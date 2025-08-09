@@ -13,10 +13,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/client"
 )
 
 func main() {
@@ -81,15 +82,20 @@ func main() {
 
 // untarGz extracts a .tgz file to targetDir
 func untarGz(src, targetDir string) error {
+	// Ensure target directory exists
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory: %v", err)
+	}
+
 	f, err := os.Open(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open source file: %v", err)
 	}
 	defer f.Close()
 
 	gzr, err := gzip.NewReader(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create gzip reader: %v", err)
 	}
 	defer gzr.Close()
 
@@ -101,26 +107,32 @@ func untarGz(src, targetDir string) error {
 			break
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read tar header: %v", err)
 		}
 
 		targetPath := filepath.Join(targetDir, header.Name)
 
+		// Security check: ensure path is within target directory
+		if !filepath.HasPrefix(targetPath, filepath.Clean(targetDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("invalid file path: %s", header.Name)
+		}
+
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
-				return err
+				return fmt.Errorf("failed to create directory %s: %v", targetPath, err)
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return err
+				return fmt.Errorf("failed to create parent directory for %s: %v", targetPath, err)
 			}
 			outFile, err := os.Create(targetPath)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to create file %s: %v", targetPath, err)
 			}
 			if _, err := io.Copy(outFile, tr); err != nil {
-				return err
+				outFile.Close()
+				return fmt.Errorf("failed to copy file content: %v", err)
 			}
 			outFile.Close()
 		}
@@ -128,16 +140,16 @@ func untarGz(src, targetDir string) error {
 	return nil
 }
 
-// buildDockerImage builds a Docker image from dir using Docker SDK
+// buildDockerImage builds a Docker image from dir using Docker client
 func buildDockerImage(ctx context.Context, srcDir, imageName string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create Docker client: %v", err)
 	}
 
 	buildCtx, err := createTar(srcDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create build context: %v", err)
 	}
 
 	buildResp, err := cli.ImageBuild(
@@ -150,28 +162,32 @@ func buildDockerImage(ctx context.Context, srcDir, imageName string) error {
 		},
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build image: %v", err)
 	}
 	defer buildResp.Body.Close()
 
 	_, err = io.Copy(os.Stdout, buildResp.Body)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to read build output: %v", err)
+	}
+	return nil
 }
 
 // createTar creates a tar stream from dir for Docker build context
 func createTar(srcDir string) (io.Reader, error) {
 	buf := new(bytes.Buffer)
 	tw := tar.NewWriter(buf)
-	defer tw.Close()
 
 	err := filepath.Walk(srcDir, func(file string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+
 		relPath, err := filepath.Rel(srcDir, file)
 		if err != nil {
 			return err
 		}
+
 		if fi.IsDir() {
 			return nil
 		}
@@ -190,13 +206,23 @@ func createTar(srcDir string) (io.Reader, error) {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 
 		_, err = io.Copy(tw, f)
-		return err
+		f.Close() // Close immediately, not deferred in loop
+		if err != nil {
+			return err
+		}
+
+		return nil
 	})
+
+	// Close the tar writer and check for errors
+	closeErr := tw.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to walk directory: %v", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close tar writer: %v", closeErr)
 	}
 
 	return buf, nil
@@ -211,7 +237,7 @@ func encodeDockerAuth(username, password, server string) (string, error) {
 	}
 	encodedJSON, err := json.Marshal(authConfig)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to marshal auth config: %v", err)
 	}
 	return base64.URLEncoding.EncodeToString(encodedJSON), nil
 }
@@ -220,17 +246,20 @@ func encodeDockerAuth(username, password, server string) (string, error) {
 func pushDockerImage(ctx context.Context, imageName, authStr string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create Docker client: %v", err)
 	}
 
 	pushResp, err := cli.ImagePush(ctx, imageName, types.ImagePushOptions{
 		RegistryAuth: authStr,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to push image: %v", err)
 	}
 	defer pushResp.Close()
 
 	_, err = io.Copy(os.Stdout, pushResp)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to read push output: %v", err)
+	}
+	return nil
 }

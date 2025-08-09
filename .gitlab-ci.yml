@@ -16,6 +16,8 @@ build-job:
   before_script:
     - sleep 15
     - docker login $DOCKER_REGISTRY -u $DOCKER_USER -p $DOCKER_PASS
+    - apk update
+    - apk add jq
   script:
     - docker build -t $DOCKER_REGISTRY/test/deploy:v1.0.0 -t $DOCKER_REGISTRY/test/deploy:latest .
     - docker push $DOCKER_REGISTRY/test/deploy:v1.0.0

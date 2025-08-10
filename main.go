@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -12,11 +13,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 )
 
@@ -27,8 +30,8 @@ func main() {
 	secretKey := "minioadmin"
 	bucketName := "builds"
 	objectName := "app.tgz"
-	localFile := "/tmp/app.tgz"
-	extractDir := "/tmp/app"
+	localFile := "/tmp/app/app.tgz"
+	extractDir := "/tmp/app/extracted"
 	imageName := "myrepo/myapp:latest" // your registry + repo + tag
 
 	// Docker registry credentials
@@ -37,6 +40,11 @@ func main() {
 	registryServer := "https://index.docker.io/v1/" // Docker Hub; change for private registry
 
 	ctx := context.Background()
+
+	// Ensure temp directories exist
+	if err := os.MkdirAll(filepath.Dir(localFile), 0755); err != nil {
+		log.Fatalf("Failed to create temp directory: %v", err)
+	}
 
 	// ===== 1️⃣ Download from MinIO =====
 	fmt.Println("Downloading from MinIO...")
@@ -78,6 +86,13 @@ func main() {
 		log.Fatalf("Docker push failed: %v", err)
 	}
 	fmt.Println("Docker image pushed:", imageName)
+
+	// Cleanup
+	fmt.Println("Cleaning up temporary files...")
+	if err := os.RemoveAll("/tmp/app"); err != nil {
+		log.Printf("Warning: Failed to cleanup temp files: %v", err)
+	}
+	fmt.Println("Pipeline completed successfully!")
 }
 
 // untarGz extracts a .tgz file to targetDir
@@ -110,10 +125,16 @@ func untarGz(src, targetDir string) error {
 			return fmt.Errorf("failed to read tar header: %v", err)
 		}
 
-		targetPath := filepath.Join(targetDir, header.Name)
+		// Normalize the path to prevent directory traversal
+		cleanPath := filepath.Clean(header.Name)
+		if strings.Contains(cleanPath, "..") {
+			return fmt.Errorf("invalid file path: %s", header.Name)
+		}
+
+		targetPath := filepath.Join(targetDir, cleanPath)
 
 		// Security check: ensure path is within target directory
-		if !filepath.HasPrefix(targetPath, filepath.Clean(targetDir)+string(os.PathSeparator)) {
+		if !strings.HasPrefix(targetPath, filepath.Clean(targetDir)+string(os.PathSeparator)) {
 			return fmt.Errorf("invalid file path: %s", header.Name)
 		}
 
@@ -126,7 +147,7 @@ func untarGz(src, targetDir string) error {
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 				return fmt.Errorf("failed to create parent directory for %s: %v", targetPath, err)
 			}
-			outFile, err := os.Create(targetPath)
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %v", targetPath, err)
 			}
@@ -146,30 +167,52 @@ func buildDockerImage(ctx context.Context, srcDir, imageName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Docker client: %v", err)
 	}
+	defer cli.Close()
 
 	buildCtx, err := createTar(srcDir)
 	if err != nil {
 		return fmt.Errorf("failed to create build context: %v", err)
 	}
 
-	buildResp, err := cli.ImageBuild(
-		ctx,
-		buildCtx,
-		types.ImageBuildOptions{
-			Tags:       []string{imageName},
-			Dockerfile: "Dockerfile",
-			Remove:     true,
-		},
-	)
+	buildOptions := image.BuildOptions{
+		Tags:           []string{imageName},
+		Dockerfile:     "Dockerfile",
+		Remove:         true,
+		ForceRemove:    true,
+		PullParent:     true,
+		SuppressOutput: false,
+	}
+
+	buildResp, err := cli.ImageBuild(ctx, buildCtx, buildOptions)
 	if err != nil {
 		return fmt.Errorf("failed to build image: %v", err)
 	}
 	defer buildResp.Body.Close()
 
-	_, err = io.Copy(os.Stdout, buildResp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read build output: %v", err)
+	// Stream build output
+	scanner := bufio.NewScanner(buildResp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var buildOutput struct {
+			Stream string `json:"stream"`
+			Error  string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &buildOutput); err == nil {
+			if buildOutput.Error != "" {
+				return fmt.Errorf("build error: %s", buildOutput.Error)
+			}
+			if buildOutput.Stream != "" {
+				fmt.Print(buildOutput.Stream)
+			}
+		} else {
+			fmt.Println(line)
+		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading build output: %v", err)
+	}
+
 	return nil
 }
 
@@ -188,7 +231,13 @@ func createTar(srcDir string) (io.Reader, error) {
 			return err
 		}
 
+		// Skip directories in tar, they'll be created as needed
 		if fi.IsDir() {
+			return nil
+		}
+
+		// Skip hidden files and directories (optional)
+		if strings.HasPrefix(filepath.Base(file), ".") && filepath.Base(file) != ".dockerignore" {
 			return nil
 		}
 
@@ -196,7 +245,7 @@ func createTar(srcDir string) (io.Reader, error) {
 		if err != nil {
 			return err
 		}
-		hdr.Name = relPath
+		hdr.Name = filepath.ToSlash(relPath) // Ensure forward slashes for Docker
 
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
@@ -230,7 +279,7 @@ func createTar(srcDir string) (io.Reader, error) {
 
 // encodeDockerAuth creates base64 auth string for Docker push
 func encodeDockerAuth(username, password, server string) (string, error) {
-	authConfig := types.AuthConfig{
+	authConfig := registry.AuthConfig{
 		Username:      username,
 		Password:      password,
 		ServerAddress: server,
@@ -248,18 +297,46 @@ func pushDockerImage(ctx context.Context, imageName, authStr string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Docker client: %v", err)
 	}
+	defer cli.Close()
 
-	pushResp, err := cli.ImagePush(ctx, imageName, types.ImagePushOptions{
+	pushOptions := image.PushOptions{
 		RegistryAuth: authStr,
-	})
+	}
+
+	pushResp, err := cli.ImagePush(ctx, imageName, pushOptions)
 	if err != nil {
 		return fmt.Errorf("failed to push image: %v", err)
 	}
 	defer pushResp.Close()
 
-	_, err = io.Copy(os.Stdout, pushResp)
-	if err != nil {
-		return fmt.Errorf("failed to read push output: %v", err)
+	// Stream push output
+	scanner := bufio.NewScanner(pushResp)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var pushOutput struct {
+			Status   string `json:"status"`
+			Progress string `json:"progress"`
+			Error    string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &pushOutput); err == nil {
+			if pushOutput.Error != "" {
+				return fmt.Errorf("push error: %s", pushOutput.Error)
+			}
+			if pushOutput.Status != "" {
+				if pushOutput.Progress != "" {
+					fmt.Printf("%s: %s\n", pushOutput.Status, pushOutput.Progress)
+				} else {
+					fmt.Println(pushOutput.Status)
+				}
+			}
+		} else {
+			fmt.Println(line)
+		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading push output: %v", err)
+	}
+
 	return nil
 }

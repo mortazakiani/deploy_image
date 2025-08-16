@@ -2,12 +2,9 @@ package main
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -17,10 +14,6 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/client"
 )
 
 func main() {
@@ -32,12 +25,6 @@ func main() {
 	objectName := "app.tgz"
 	localFile := "/tmp/app/app.tgz"
 	extractDir := "/tmp/app/extracted"
-	imageName := "myrepo/myapp:latest" // your registry + repo + tag
-
-	// Docker registry credentials
-	registryUser := "myuser"
-	registryPass := "mypass"
-	registryServer := "https://index.docker.io/v1/" // Docker Hub; change for private registry
 
 	ctx := context.Background()
 
@@ -68,31 +55,6 @@ func main() {
 		log.Fatalf("Failed to extract: %v", err)
 	}
 	fmt.Println("Extracted to:", extractDir)
-
-	// ===== 3️⃣ Build Docker Image =====
-	fmt.Println("Building Docker image...")
-	if err := buildDockerImage(ctx, extractDir, imageName); err != nil {
-		log.Fatalf("Docker build failed: %v", err)
-	}
-	fmt.Println("Docker image built:", imageName)
-
-	// ===== 4️⃣ Push Docker Image with Auth =====
-	fmt.Println("Pushing Docker image...")
-	authStr, err := encodeDockerAuth(registryUser, registryPass, registryServer)
-	if err != nil {
-		log.Fatalf("Failed to encode auth: %v", err)
-	}
-	if err := pushDockerImage(ctx, imageName, authStr); err != nil {
-		log.Fatalf("Docker push failed: %v", err)
-	}
-	fmt.Println("Docker image pushed:", imageName)
-
-	// Cleanup
-	fmt.Println("Cleaning up temporary files...")
-	if err := os.RemoveAll("/tmp/app"); err != nil {
-		log.Printf("Warning: Failed to cleanup temp files: %v", err)
-	}
-	fmt.Println("Pipeline completed successfully!")
 }
 
 // untarGz extracts a .tgz file to targetDir
@@ -161,61 +123,6 @@ func untarGz(src, targetDir string) error {
 	return nil
 }
 
-// buildDockerImage builds a Docker image from dir using Docker client
-func buildDockerImage(ctx context.Context, srcDir, imageName string) error {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return fmt.Errorf("failed to create Docker client: %v", err)
-	}
-	defer cli.Close()
-
-	buildCtx, err := createTar(srcDir)
-	if err != nil {
-		return fmt.Errorf("failed to create build context: %v", err)
-	}
-
-	buildOptions := image.BuildOptions{
-		Tags:           []string{imageName},
-		Dockerfile:     "Dockerfile",
-		Remove:         true,
-		ForceRemove:    true,
-		PullParent:     true,
-		SuppressOutput: false,
-	}
-
-	buildResp, err := cli.ImageBuild(ctx, buildCtx, buildOptions)
-	if err != nil {
-		return fmt.Errorf("failed to build image: %v", err)
-	}
-	defer buildResp.Body.Close()
-
-	// Stream build output
-	scanner := bufio.NewScanner(buildResp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var buildOutput struct {
-			Stream string `json:"stream"`
-			Error  string `json:"error"`
-		}
-		if err := json.Unmarshal([]byte(line), &buildOutput); err == nil {
-			if buildOutput.Error != "" {
-				return fmt.Errorf("build error: %s", buildOutput.Error)
-			}
-			if buildOutput.Stream != "" {
-				fmt.Print(buildOutput.Stream)
-			}
-		} else {
-			fmt.Println(line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading build output: %v", err)
-	}
-
-	return nil
-}
-
 // createTar creates a tar stream from dir for Docker build context
 func createTar(srcDir string) (io.Reader, error) {
 	buf := new(bytes.Buffer)
@@ -275,68 +182,4 @@ func createTar(srcDir string) (io.Reader, error) {
 	}
 
 	return buf, nil
-}
-
-// encodeDockerAuth creates base64 auth string for Docker push
-func encodeDockerAuth(username, password, server string) (string, error) {
-	authConfig := registry.AuthConfig{
-		Username:      username,
-		Password:      password,
-		ServerAddress: server,
-	}
-	encodedJSON, err := json.Marshal(authConfig)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal auth config: %v", err)
-	}
-	return base64.URLEncoding.EncodeToString(encodedJSON), nil
-}
-
-// pushDockerImage pushes the built image with auth
-func pushDockerImage(ctx context.Context, imageName, authStr string) error {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return fmt.Errorf("failed to create Docker client: %v", err)
-	}
-	defer cli.Close()
-
-	pushOptions := image.PushOptions{
-		RegistryAuth: authStr,
-	}
-
-	pushResp, err := cli.ImagePush(ctx, imageName, pushOptions)
-	if err != nil {
-		return fmt.Errorf("failed to push image: %v", err)
-	}
-	defer pushResp.Close()
-
-	// Stream push output
-	scanner := bufio.NewScanner(pushResp)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var pushOutput struct {
-			Status   string `json:"status"`
-			Progress string `json:"progress"`
-			Error    string `json:"error"`
-		}
-		if err := json.Unmarshal([]byte(line), &pushOutput); err == nil {
-			if pushOutput.Error != "" {
-				return fmt.Errorf("push error: %s", pushOutput.Error)
-			}
-			if pushOutput.Status != "" {
-				if pushOutput.Progress != "" {
-					fmt.Printf("%s: %s\n", pushOutput.Status, pushOutput.Progress)
-				} else {
-					fmt.Println(pushOutput.Status)
-				}
-			}
-		} else {
-			fmt.Println(line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading push output: %v", err)
-	}
-
-	return nil
 }

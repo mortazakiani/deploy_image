@@ -18,7 +18,7 @@ import (
 
 func main() {
 	// ===== Config =====
-	minioEndpoint := "37.32.8.181:32446"
+	minioEndpoint := "https://37.32.8.181:32446"
 	accessKey := "stage"
 	secretKey := "Lj5UlGa6v6uUDMUk"
 	bucketName := "test.test123"

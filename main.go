@@ -18,12 +18,12 @@ import (
 
 func main() {
 	// ===== Config =====
-	minioEndpoint := "minio.example.com:9000"
-	accessKey := "minioadmin"
-	secretKey := "minioadmin"
-	bucketName := "builds"
-	objectName := "app.tgz"
-	localFile := "/tmp/app/app.tgz"
+	minioEndpoint := "37.32.8.181:32446"
+	accessKey := "stage"
+	secretKey := "Lj5UlGa6v6uUDMUk"
+	bucketName := "test.test123"
+	objectName := "nginx-1.28.0.tar.gz"
+	localFile := "/tmp/app/nginx-1.28.0.tar.gz"
 	extractDir := "/tmp/app/extracted"
 
 	ctx := context.Background()

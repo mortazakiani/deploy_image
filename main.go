@@ -22,8 +22,8 @@ func main() {
 	accessKey := "stage"
 	secretKey := "Lj5UlGa6v6uUDMUk"
 	bucketName := "test.test123"
-	objectName := "nginx-1.28.0.tar.gz"
-	localFile := "/tmp/app/nginx-1.28.0.tar.gz"
+	objectName := "bento.tar.gz"
+	localFile := "/tmp/app/bento.tar.gz"
 	extractDir := "/tmp/app/extracted"
 
 	ctx := context.Background()

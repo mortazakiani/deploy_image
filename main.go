@@ -18,7 +18,7 @@ import (
 
 func main() {
 	// ===== Config =====
-	minioEndpoint := "https://37.32.8.181:32446"
+	minioEndpoint := "37.32.8.181:32446"
 	accessKey := "stage"
 	secretKey := "Lj5UlGa6v6uUDMUk"
 	bucketName := "test.test123"
@@ -37,7 +37,7 @@ func main() {
 	fmt.Println("Downloading from MinIO...")
 	minioClient, err := minio.New(minioEndpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: false, // true if https
+		Secure: true, // true if https
 	})
 	if err != nil {
 		log.Fatalf("Failed to init MinIO client: %v", err)

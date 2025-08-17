@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -121,65 +120,4 @@ func untarGz(src, targetDir string) error {
 		}
 	}
 	return nil
-}
-
-// createTar creates a tar stream from dir for Docker build context
-func createTar(srcDir string) (io.Reader, error) {
-	buf := new(bytes.Buffer)
-	tw := tar.NewWriter(buf)
-
-	err := filepath.Walk(srcDir, func(file string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(srcDir, file)
-		if err != nil {
-			return err
-		}
-
-		// Skip directories in tar, they'll be created as needed
-		if fi.IsDir() {
-			return nil
-		}
-
-		// Skip hidden files and directories (optional)
-		if strings.HasPrefix(filepath.Base(file), ".") && filepath.Base(file) != ".dockerignore" {
-			return nil
-		}
-
-		hdr, err := tar.FileInfoHeader(fi, "")
-		if err != nil {
-			return err
-		}
-		hdr.Name = filepath.ToSlash(relPath) // Ensure forward slashes for Docker
-
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-
-		f, err := os.Open(file)
-		if err != nil {
-			return err
-		}
-
-		_, err = io.Copy(tw, f)
-		f.Close() // Close immediately, not deferred in loop
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-
-	// Close the tar writer and check for errors
-	closeErr := tw.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %v", err)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("failed to close tar writer: %v", closeErr)
-	}
-
-	return buf, nil
 }

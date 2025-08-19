@@ -56,6 +56,34 @@ func main() {
 		log.Fatalf("Failed to extract: %v", err)
 	}
 	fmt.Println("Extracted to:", extractDir)
+	dockerfile := filepath.Join(extractDir, "Dockerfile")
+	if _, err := os.Stat(dockerfile); err != nil {
+		log.Fatalf("Dockerfile not found at %s (err: %v)", dockerfile, err)
+	}
+
+	ctxDir := extractDir + ""
+	dfRel := "Dockerfile"
+
+	// ===== 4️⃣ Build the image =====
+	fmt.Println("Building Docker image...")
+	cli, err := docker.NewClientFromEnv()
+	if err != nil {
+		log.Fatalf("Failed to init Docker client: %v", err)
+	}
+
+	buildOpts := docker.BuildImageOptions{
+		Name:         "myapp:latest", // change as needed
+		ContextDir:   ctxDir,         // directory to send as build context
+		Dockerfile:   dfRel,          // Dockerfile path *relative to ContextDir*
+		Pull:         true,           // pull newer base images
+		NoCache:      false,          // set true if you want a clean build
+		OutputStream: os.Stdout,      // stream build output to console
+	}
+
+	if err := cli.BuildImage(buildOpts); err != nil {
+		log.Fatalf("Docker build failed: %v", err)
+	}
+	fmt.Println("Docker image built successfully!")
 }
 
 // untarGz extracts a .tgz file to targetDir

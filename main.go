@@ -13,6 +13,8 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	docker "github.com/fsouza/go-dockerclient"
 )
 
 func main() {
